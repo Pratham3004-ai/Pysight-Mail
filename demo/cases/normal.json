@@ -1,0 +1,8 @@
+[
+  {"name":"thanks","subject":"Thank you","body":"I appreciate the quick help. The replacement is excellent."},
+  {"name":"complaint","subject":"Late delivery","body":"My package is late and I am disappointed."},
+  {"name":"neutral","subject":"Schedule","body":"Please confirm the delivery date for order AB-12."},
+  {"name":"mixed","subject":"Mixed feedback","body":"Thanks for helping, but the delivery was late."},
+  {"name":"ordinary request","subject":"Invoice","body":"Could you please resend my invoice?"},
+  {"name":"empty-ish","subject":"","body":"  Just checking in.  "}
+]

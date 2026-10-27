@@ -1,0 +1,1 @@
+"""Stateless email sentiment analyzer."""

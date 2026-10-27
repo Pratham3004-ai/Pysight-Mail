@@ -1,0 +1,4 @@
+[
+  {"name":"long body","subject":"Long email","body_chars":100001},
+  {"name":"rate limit","subject":"Repeat","body":"The delivery was great."}
+]

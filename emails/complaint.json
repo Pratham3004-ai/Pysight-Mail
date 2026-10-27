@@ -1,0 +1,6 @@
+{
+  "id": "email-001",
+  "from": "customer.one@example.com",
+  "subject": "Damaged delivery",
+  "body": "Hello, my parcel arrived damaged and I am very disappointed. My order number is 123456789. Please resolve this quickly."
+}

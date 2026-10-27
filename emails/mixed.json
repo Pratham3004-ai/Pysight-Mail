@@ -1,0 +1,6 @@
+{
+  "id": "email-003",
+  "from": "customer.three@example.com",
+  "subject": "Feedback on my purchase",
+  "body": "<p>I loved the product quality, but the late delivery was frustrating.</p><p>Please improve your shipping times.</p>"
+}
