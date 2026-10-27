@@ -1,3 +1,4 @@
+
 """Simple CLI sharing the same core as FastAPI."""
 from __future__ import annotations
 
@@ -15,7 +16,6 @@ from app.security_store import (
     revoke_user_tokens,
     rotate_user_token,
 )
-
 
 def _status(message: str) -> None:
     """Show safe progress information without showing email content."""
