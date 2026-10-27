@@ -262,7 +262,7 @@ Example questions:
 
 ## What the guardrails still miss
 
-PII masking and injection detection use patterns, so unusual phone formats and indirect or encoded instructions can pass through. Rate limits are process-local and keyed by IP, so they reset on restart and are not suitable for a multi-worker deployment. RAG citations show the retrieved excerpts used as context; generated text still needs review for faithful grounding. The offline classifier is only a pipeline demonstration, not a sentiment model.
+PII masking and injection detection use patterns, so unusual phone formats and indirect or encoded instructions can pass through. The integrated sentiment and RAG rate limits are stored in SQLite and keyed by authenticated user; standalone RAG uses a persistent SQLite limit keyed by client IP. These local limits are not shared across multiple machines or a production multi-host deployment. RAG citations show the retrieved excerpts used as context; generated text still needs review for faithful grounding. The offline classifier is only a pipeline demonstration, not a sentiment model.
 
 ## Standalone email RAG
 
