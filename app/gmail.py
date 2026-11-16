@@ -123,6 +123,35 @@ def _gmail_service(credentials):
     return build("gmail", "v1", credentials=credentials, cache_discovery=False)
 
 
+def _save_connection(owner_id: str, credentials, address: str) -> dict:
+    now = _now().isoformat()
+    if not credentials.refresh_token:
+        raise ValueError("Google did not return a refresh token. Reconnect with consent.")
+    with closing(_connect()) as connection, connection:
+        connection.execute(
+            """INSERT INTO gmail_connections(owner_id,gmail_address,refresh_token,scopes_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?)
+               ON CONFLICT(owner_id) DO UPDATE SET gmail_address=excluded.gmail_address,
+               refresh_token=excluded.refresh_token, scopes_json=excluded.scopes_json,
+               updated_at=excluded.updated_at""",
+            (owner_id, address, credentials.refresh_token, json.dumps([GOOGLE_SCOPE]), now, now),
+        )
+    return {"owner_id": owner_id, "gmail_address": address}
+
+
+def connect_local(owner_id: str) -> dict:
+    """Connect a user through Google's desktop loopback OAuth flow."""
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    flow = InstalledAppFlow.from_client_secrets_file(_client_secrets_path(), [GOOGLE_SCOPE])
+    credentials = flow.run_local_server(port=0, access_type="offline", prompt="consent")
+    profile = _gmail_service(credentials).users().getProfile(userId="me").execute()
+    address = profile.get("emailAddress")
+    if not address:
+        raise ValueError("Google did not return a Gmail address.")
+    return _save_connection(owner_id, credentials, address)
+
+
 def exchange_code(state: str, code: str) -> dict:
     owner_id = consume_oauth_state(state)
     if owner_id is None:
@@ -136,17 +165,7 @@ def exchange_code(state: str, code: str) -> dict:
     address = profile.get("emailAddress")
     if not address:
         raise ValueError("Google did not return a Gmail address.")
-    now = _now().isoformat()
-    with closing(_connect()) as connection, connection:
-        connection.execute(
-            """INSERT INTO gmail_connections(owner_id,gmail_address,refresh_token,scopes_json,created_at,updated_at)
-               VALUES(?,?,?,?,?,?)
-               ON CONFLICT(owner_id) DO UPDATE SET gmail_address=excluded.gmail_address,
-               refresh_token=excluded.refresh_token, scopes_json=excluded.scopes_json,
-               updated_at=excluded.updated_at""",
-            (owner_id, address, credentials.refresh_token, json.dumps([GOOGLE_SCOPE]), now, now),
-        )
-    return {"owner_id": owner_id, "gmail_address": address}
+    return _save_connection(owner_id, credentials, address)
 
 
 def connection_status(owner_id: str) -> dict | None:

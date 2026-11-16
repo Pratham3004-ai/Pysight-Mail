@@ -8,6 +8,7 @@ import os
 import sys
 
 from app.core import AppError, analyze_email, attach_diagnostic, list_emails, resolve_input
+from app.gmail import connect_local
 from app.security_store import (
     SUPPORTED_SCOPES,
     SecurityStoreError,
@@ -61,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
     analyze.add_argument("--offline", action="store_true", help="Run the local mock pipeline without Gemini")
     analyze.add_argument("--json", action="store_true", help="Print machine-readable JSON instead of the readable summary.")
     commands.add_parser("serve", help="Run the local API at http://127.0.0.1:8000")
+    gmail = commands.add_parser("gmail", help="Connect a Gmail account for a local Pysight user.")
+    gmail_commands = gmail.add_subparsers(dest="gmail_command", required=True)
+    connect = gmail_commands.add_parser("connect", help="Connect with Google's desktop loopback OAuth flow.")
+    connect.add_argument("--user-id", required=True)
     auth = commands.add_parser("auth", help="Provision distinct, expiring user API tokens locally.")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True)
     scopes_help = "Allowed scopes: " + ", ".join(sorted(SUPPORTED_SCOPES))
@@ -95,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
             import uvicorn
             print("Starting local API at http://127.0.0.1:8000 (press Ctrl+C to stop)", file=sys.stderr)
             uvicorn.run("app.api:app", host="127.0.0.1", port=8000, access_log=False, log_level="critical")
+            return 0
+        if args.command == "gmail":
+            if args.gmail_command == "connect":
+                result = connect_local(args.user_id)
+                print(f"Gmail connected for {result['owner_id']}: {result['gmail_address']}")
             return 0
         if args.command == "emails":
             if not args.json:
