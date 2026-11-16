@@ -1,8 +1,9 @@
-"""SQLite-backed API credentials and durable rate-limit counters."""
+"""SQLite credentials and optional Redis-shared rate-limit counters."""
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import sqlite3
@@ -11,13 +12,35 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 
-SUPPORTED_SCOPES = frozenset({"emails:read", "sentiment:analyze", "rag:query", "history:read"})
+SUPPORTED_SCOPES = frozenset({"emails:read", "sentiment:analyze", "rag:query", "history:read", "gmail:read"})
 MIN_RATE_WINDOW_SECONDS = 120
 _USER_ID = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 
 
 class SecurityStoreError(ValueError):
     """Safe operator-facing error from local credential management."""
+
+
+class RateLimitBackendError(RuntimeError):
+    """A configured shared rate-limit backend is unavailable or misconfigured."""
+
+
+_REDIS_RATE_LIMIT_SCRIPT = """
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local window_ms = tonumber(ARGV[2])
+local now_ms = tonumber(ARGV[3])
+local member = ARGV[4]
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now_ms - window_ms)
+local count = redis.call('ZCARD', key)
+if count >= limit then
+  redis.call('PEXPIRE', key, window_ms)
+  return 0
+end
+redis.call('ZADD', key, now_ms, member)
+redis.call('PEXPIRE', key, window_ms)
+return 1
+"""
 
 
 def _db_path():
@@ -154,7 +177,6 @@ def list_user_tokens() -> list[dict]:
         })
     return items
 
-
 def authenticate_api_token(token: str) -> dict | None:
     if not token:
         return None
@@ -168,17 +190,61 @@ def authenticate_api_token(token: str) -> dict | None:
         return None
     return {"user_id": row[0], "scopes": frozenset(json.loads(row[1]))}
 
-
 def effective_window_seconds(window_seconds: int) -> int:
     return max(MIN_RATE_WINDOW_SECONDS, int(window_seconds))
 
 
 def consume_rate_limit(bucket: str, subject: str, limit: int, window_seconds: int, *, now: float | None = None) -> bool:
-    """Atomically persist one request event, surviving application restarts."""
+    """Consume one rolling-window event; Redis is shared, SQLite is local-only."""
     if limit < 1:
         limit = 1
     window = effective_window_seconds(window_seconds)
     current = time.time() if now is None else now
+    shared_required = os.environ.get("RATE_LIMIT_REQUIRE_SHARED", "").strip().casefold() in {"1", "true", "yes", "on"}
+    redis_url = os.environ.get("REDIS_URL", "").strip()
+    if now is None and (redis_url or shared_required):
+        if not redis_url:
+            raise RateLimitBackendError("Shared rate-limit service is required but REDIS_URL is not configured.")
+        return _consume_redis_rate_limit(bucket, subject, limit, window, redis_url)
+    return _consume_sqlite_rate_limit(bucket, subject, limit, window, current)
+
+
+def _consume_redis_rate_limit(bucket: str, subject: str, limit: int, window: int, redis_url: str) -> bool:
+    try:
+        from redis import Redis
+    except ImportError as exc:
+        raise RateLimitBackendError("Shared rate-limit service client is not installed.") from exc
+
+    # Hash identities to avoid exposing user IDs or client IPs in Redis keys.
+    digest = hashlib.sha256(f"{bucket}\0{subject}".encode("utf-8")).hexdigest()
+    key = f"pysight:rate-limit:{digest}"
+    now_ms = int(time.time() * 1000)
+    member = f"{now_ms}:{secrets.token_hex(12)}"
+    client = None
+    try:
+        client = Redis.from_url(redis_url, socket_connect_timeout=2, socket_timeout=2)
+        result = client.eval(
+            _REDIS_RATE_LIMIT_SCRIPT,
+            1,
+            key,
+            limit,
+            window * 1000,
+            now_ms,
+            member,
+        )
+        return bool(result)
+    except Exception as exc:
+        raise RateLimitBackendError("Shared rate-limit service is unavailable.") from exc
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+
+def _consume_sqlite_rate_limit(bucket: str, subject: str, limit: int, window: int, current: float) -> bool:
+    """Atomically persist the local development counter in SQLite."""
     cutoff = current - window
     with closing(_connect()) as connection:
         connection.execute("BEGIN IMMEDIATE")

@@ -6,3 +6,8 @@ logs/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+venv/
+.mypy_cache/
+.ruff_cache/
+*.log
+secrets/client-secret.json

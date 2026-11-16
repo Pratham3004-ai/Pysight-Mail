@@ -31,7 +31,6 @@ RETRY_DELAYS_SECONDS = (0.5, 1.0)
 LOG_DIR = PROJECT_ROOT / "logs"
 ERROR_LOG = LOG_DIR / "errors.log"
 
-
 def _error_logger() -> logging.Logger:
     """Return a logger that writes only controlled, non-content failure metadata."""
     logger = logging.getLogger("email_sentiment.errors")
@@ -86,7 +85,6 @@ def _safe_request_id(exc: BaseException) -> str | None:
         if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,200}", value):
             return value
     return None
-
 
 def _provider_error(exc: BaseException, *, stage: str, model: str, duration_ms: int, response_received: bool) -> AppError:
     """Map provider/transport exceptions without retaining their potentially sensitive text."""
@@ -235,6 +233,18 @@ LABELED_SECRET_PATTERN = re.compile(
     re.IGNORECASE,
 )
 GOOGLE_API_KEY_PATTERN = re.compile(r"\bAIza[0-9A-Za-z_-]{30,}\b")
+LABELED_PHONE_PATTERN = re.compile(
+    r"\b(?:phone|mobile|cell(?:phone)?|telephone|tel)(?:\s+(?:number|no\.?))?\s*(?:is\s+|[:=]\s*)?"
+    r"(?:\+?\d[\d\s().-]{5,22}\d)",
+    re.IGNORECASE,
+)
+INTERNATIONAL_PHONE_PATTERN = re.compile(r"(?<!\w)\+\d{1,3}(?:[\s().-]*\d){7,14}(?!\w)")
+INDIA_MOBILE_PATTERN = re.compile(r"(?<!\d)(?:\+91[\s.-]?)?[6-9]\d{4}[\s.-]?\d{5}(?!\d)")
+LABELED_ID_PATTERN = re.compile(
+    r"\b(?:national\s+id|tax\s+(?:id|identifier)|employee\s+id|customer\s+id|member\s+id|policy\s+number)"
+    r"\s*(?:is\s+|[:=#]\s*)?[A-Z0-9][A-Z0-9-]{4,23}\b",
+    re.IGNORECASE,
+)
 # Payment card numbers may be written as one run or grouped with spaces/hyphens.
 CARD_NUMBER_PATTERN = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
 # Redact financial values when an email labels them, including short CVV/security codes.
@@ -273,17 +283,23 @@ ADDRESS_PATTERN = re.compile(
     re.IGNORECASE,
 )
 LABELED_NAME_PATTERN = re.compile(
-    r"\b(?:my\s+name\s+is|full\s+name\s*(?:is\s+|[:=]\s*)?)"
+    r"\b(?:(?:my\s+)?name\s*(?:is\s+|[:=]\s*)|full\s+name\s*(?:is\s+|[:=]\s*)?)"
     r"\s*[A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,3}\b",
     re.IGNORECASE,
 )
 
 
 def redact_pii(value: str) -> tuple[str, bool]:
+    # Normalize compatibility forms (e.g. full-width digits and letters) before matching.
+    value = unicodedata.normalize("NFKC", value)
     value, obfuscated_emails = OBFUSCATED_EMAIL_PATTERN.subn("[EMAIL_REDACTED]", value)
     value, emails = EMAIL_PATTERN.subn("[EMAIL_REDACTED]", value)
     value, google_keys = GOOGLE_API_KEY_PATTERN.subn("[API_KEY_REDACTED]", value)
     value, labeled_secrets = LABELED_SECRET_PATTERN.subn(r"\1\2[SECRET_REDACTED]", value)
+    value, labeled_phones = LABELED_PHONE_PATTERN.subn("[PHONE_REDACTED]", value)
+    value, international_phones = INTERNATIONAL_PHONE_PATTERN.subn("[PHONE_REDACTED]", value)
+    value, india_phones = INDIA_MOBILE_PATTERN.subn("[PHONE_REDACTED]", value)
+    value, labeled_ids = LABELED_ID_PATTERN.subn("[IDENTIFIER_REDACTED]", value)
     value, ssns = SSN_PATTERN.subn("[GOVERNMENT_ID_REDACTED]", value)
     value, passports = PASSPORT_PATTERN.subn("[GOVERNMENT_ID_REDACTED]", value)
     value, driver_ids = DRIVER_ID_PATTERN.subn("[GOVERNMENT_ID_REDACTED]", value)
@@ -297,8 +313,9 @@ def redact_pii(value: str) -> tuple[str, bool]:
     value, phones = PHONE_PATTERN.subn("[PHONE_REDACTED]", value)
     value, numbers = NUMBER_PATTERN.subn("[NUMBER_REDACTED]", value)
     return value, bool(
-        obfuscated_emails or emails or google_keys or labeled_secrets or ssns or passports or driver_ids
-        or dates_of_birth or addresses or names or cards or accounts or cvvs or ibans or phones or numbers
+        obfuscated_emails or emails or google_keys or labeled_secrets or labeled_phones or international_phones
+        or india_phones or labeled_ids or ssns or passports or driver_ids or dates_of_birth or addresses or names
+        or cards or accounts or cvvs or ibans or phones or numbers
     )
 
 
@@ -403,9 +420,12 @@ SYSTEM_INSTRUCTION = (
 _INJECTION_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE | re.DOTALL) for pattern in (
     r"\bignore\b.{0,60}\b(previous|prior|above|system|all)\b.{0,30}\b(instruction|prompt|rule)s?\b",
     r"\b(disregard|override|bypass)\b.{0,50}\b(instruction|prompt|rule|safety|policy)s?\b",
+    r"\b(ignore|disregard|forget|bypass|override|disable)\b.{0,80}\b(safety|guardrails?|content\s+polic(?:y|ies)|restrictions?|rules?)\b",
     r"\b(reveal|show|print|leak|provide|give|get|retrieve|fetch|access|obtain|find|tell|expose|return|output|dump|send|forward|what\s+is)\b.{0,100}\b(api\s*key|secret|credential|password|system\s*prompt|hidden\s*prompt|token|phone\s*number|contact\s*(?:number|details)|personal\s*(?:data|information|details)|pii|credit\s*card|debit\s*card|card\s*(?:number|details)|bank\s*(?:account|details)|account\s*(?:number|details))\b",
     r"\b(api\s*key|secret|credential|password|system\s*prompt|hidden\s*prompt|token|phone\s*number|contact\s*(?:number|details)|personal\s*(?:data|information|details)|pii|credit\s*card|debit\s*card|card\s*(?:number|details)|bank\s*(?:account|details)|account\s*(?:number|details))\b.{0,100}\b(reveal|show|print|leak|provide|give|get|retrieve|fetch|access|obtain|find|tell|expose|return|output|dump|send|forward)\b",
     r"\b(you are now|act as|roleplay as)\b.{0,50}\b(admin|administrator|developer|system|unrestricted)\b",
+    r"\b(?:developer|admin|administrator|system)\s+mode\b|\b(?:jailbreak|do\s+anything\s+now)\b",
+    r"\b(?:pretend|act|behave)\b.{0,50}\b(?:unrestricted|without\s+(?:rules|restrictions|safety))\b",
     r"\b(return|use|switch to|change|replace)\b.{0,40}\b(different|new|another)\b.{0,20}\b(schema|format)\b",
     r"\b(execute|run|launch|perform)\b.{0,40}\b(command|script|code|shell|terminal)\b",
     r"\b(send|forward|upload|post|call|open|visit|request)\b.{0,60}\b(email|https?\s*request|external\s+(?:site|service|server)|url|website|endpoint|browser)\b",
@@ -418,6 +438,15 @@ def detect_prompt_injection(subject: str, body: str) -> bool:
     """Detect common explicit attempts to override policy or extract secrets."""
     text = unicodedata.normalize("NFKC", f"{subject}\n{body}")
     text = re.sub(r"[\u200b-\u200f\ufeff]", "", text)
+    # Map common Greek/Cyrillic lookalikes so mixed-script prompt attacks match known rules.
+    lookalikes = str.maketrans({
+        "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x", "і": "i", "ј": "j",
+        "у": "y", "ѕ": "s", "ԁ": "d", "һ": "h", "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z",
+        "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P", "Τ": "T",
+        "Υ": "Y", "Χ": "X", "α": "a", "β": "b", "ε": "e", "ι": "i", "κ": "k", "ο": "o",
+        "ρ": "p", "τ": "t", "υ": "y", "χ": "x",
+    })
+    text = text.translate(lookalikes)
     # Catch simple digit substitutions often used to disguise known phrases.
     disguised = text.translate(str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t"}))
     text = text + "\n" + disguised

@@ -438,11 +438,13 @@ Current local-demo policy defaults:
 10 standalone RAG requests per client IP per 120 seconds
 ```
 
-Limits are configurable through environment variables, persisted in SQLite, and
-the configured window is clamped to at least 120 seconds. SQLite counters
-survive process restarts; standalone RAG uses client IP as its rate-limit
-subject. For production multi-host deployments, use a shared distributed
-limiter instead.
+Limits are configurable through environment variables, and the configured
+window is clamped to at least 120 seconds. Without `REDIS_URL`, counters are
+persisted in local SQLite and survive process restarts on that host. With
+`REDIS_URL`, an atomic Redis script shares the rolling counters across hosts;
+set `RATE_LIMIT_REQUIRE_SHARED=true` to fail closed if the Redis configuration
+or service is unavailable. Standalone RAG uses client IP as its rate-limit
+subject.
 
 Example:
 
@@ -830,7 +832,8 @@ The following should be working before Phase 1 is considered complete:
 - [x] Bounded 429 retry/backoff
 - [x] `.env` excluded from Git
 - [x] Per-user expiring/revocable API tokens and route scopes
-- [x] Durable SQLite rate limits with a 120-second minimum window
+- [x] Durable SQLite rate limits for local/single-host use with a 120-second minimum window
+- [x] Optional shared Redis rate limits with atomic rolling-window updates and fail-closed required mode
 - [x] Standalone RAG rate limit keyed by client IP
 - [x] Security tests
 - [x] Offline/mock mode uses the same validation path

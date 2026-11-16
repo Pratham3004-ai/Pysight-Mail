@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from app.auth import authenticate_request, authorize_scope
 from app.core import AppError, attach_diagnostic
-from app.security_store import consume_rate_limit
+from app.security_store import RateLimitBackendError, consume_rate_limit
 from app.vector_store import save_record
 from standalone_rag.core import MAX_BODY_BYTES, answer_question
 
@@ -34,7 +34,11 @@ async def require_api_key(request: Request, call_next):
 def _rate_limit(client_ip: str) -> None:
     limit = max(1, int(os.environ.get("RAG_RATE_LIMIT_REQUESTS", "10")))
     window = max(120, int(os.environ.get("RAG_RATE_LIMIT_WINDOW_SECONDS", "120")))
-    if not consume_rate_limit("standalone_rag_ip", client_ip, limit, window):
+    try:
+        allowed = consume_rate_limit("standalone_rag_ip", client_ip, limit, window)
+    except RateLimitBackendError as exc:
+        raise AppError("Shared rate-limit service is unavailable.", 503, stage="rag_rate_limit", category="backend_unavailable") from exc
+    if not allowed:
         raise AppError("RAG query rate limit exceeded. Try again shortly.", 429, stage="rag_rate_limit", category="rate_limited")
 
 

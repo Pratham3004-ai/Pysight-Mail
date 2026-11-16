@@ -47,6 +47,12 @@ RATE_LIMIT_REQUESTS=10
 RATE_LIMIT_WINDOW_SECONDS=120
 RAG_RATE_LIMIT_REQUESTS=10
 RAG_RATE_LIMIT_WINDOW_SECONDS=120
+# For a multi-host deployment, configure a private Redis endpoint and require it.
+REDIS_URL=rediss://username:password@redis.example.net:6379/0
+RATE_LIMIT_REQUIRE_SHARED=true
+# Gmail OAuth (use the JSON downloaded from Google Cloud Console)
+GOOGLE_CLIENT_SECRETS_FILE=secrets/google-client.json
+GOOGLE_REDIRECT_URI=http://127.0.0.1:8000/auth/google/callback
 ```
 
 If `.env` already exists, keep it and add/update only the required settings.
@@ -55,7 +61,7 @@ token for each API user through the local CLI; the database stores only a hash
 and the plaintext token is shown once:
 
 ```powershell
-python -m app auth create-user --user-id analyst-1 --expires-in-days 30 --scopes emails:read sentiment:analyze rag:query history:read
+python -m app auth create-user --user-id analyst-1 --expires-in-days 30 --scopes emails:read sentiment:analyze rag:query history:read gmail:read
 python -m app auth list
 ```
 
@@ -63,7 +69,7 @@ Copy the printed token into that user's local/secret Postman environment as
 `apiKey`. Tokens expire after 30 days by default. Rotate or revoke them with:
 
 ```powershell
-python -m app auth rotate --user-id analyst-1 --expires-in-days 30 --scopes emails:read sentiment:analyze rag:query history:read
+python -m app auth rotate --user-id analyst-1 --expires-in-days 30 --scopes emails:read sentiment:analyze rag:query history:read gmail:read
 python -m app auth revoke --user-id analyst-1
 ```
 
@@ -77,9 +83,10 @@ manual header instead, set `Authorization: Bearer {{apiKey}}` or
 
 Scopes are checked per route: `emails:read` lists local emails,
 `sentiment:analyze` allows `/analyze`, `rag:query` allows either RAG query API,
-and `history:read` allows history and vector search. A valid token without the
-needed scope receives HTTP 403. An old `APP_API_KEY` entry in `.env` is ignored
-by token authentication and can be removed.
+`history:read` allows history and vector search, and `gmail:read` allows the
+Gmail connection status and message routes. A valid token without the needed
+scope receives HTTP 403. An old `APP_API_KEY` entry in `.env` is ignored by
+token authentication and can be removed.
 
 Run an analysis:
 
@@ -102,6 +109,56 @@ Analyze one local JSON file from `emails/`:
 ```powershell
 python -m app analyze --source file --path complaint.json
 ```
+
+## Gmail OAuth and messages
+
+This integration connects one Gmail account to each authenticated Pysight user.
+It uses Google's OAuth 2.0 flow and the read-only Gmail scope; it never uses or
+stores a Gmail password. For local development:
+
+1. Enable the Gmail API in Google Cloud Console.
+2. Configure an **External** OAuth consent screen and add your personal Gmail
+  address as a test user.
+3. Create a **Web application** OAuth client and add this exact redirect URI:
+  `http://127.0.0.1:8000/auth/google/callback`.
+4. Download the client JSON to `secrets/google-client.json`. This file and all
+  Gmail refresh tokens must remain private.
+5. Start the server and open the OAuth start URL with a Pysight API token:
+
+```powershell
+python -m app serve
+$headers = @{ Authorization = 'Bearer <token-with-gmail-read>' }
+Invoke-WebRequest -Headers $headers -Uri http://localhost:8000/auth/google/start
+```
+
+The endpoint redirects the browser to Google. After consent, Google redirects
+to `/auth/google/callback`, where Pysight stores the refresh token for the
+authenticated local user. The callback is protected by a short-lived,
+single-use OAuth state value because Google does not send the original API
+Bearer header back to the application.
+
+Check the connection:
+
+```text
+GET /gmail/status
+```
+
+List Gmail messages. The `q` value uses Gmail's native search syntax:
+
+```text
+GET /gmail/messages?q=is:unread&max_results=25&sort_by=date&order=desc
+GET /gmail/messages?q=from:customer@example.com
+GET /gmail/messages?page_token=<next_page_token>
+GET /gmail/messages/<message_id>
+```
+
+Supported local query parameters are `q`, `max_results` (1-100),
+`page_token`, `sort_by` (`date`, `subject`, or `sender`), and `order` (`asc` or
+`desc`). Gmail pagination tokens are opaque and should be passed back unchanged.
+The first version fetches message metadata and fetches the full body only for a
+specific message endpoint. Gmail account data is private; the current local
+SQLite database is unencrypted, so use synthetic or development data until
+credential encryption and production secret management are added.
 
 Analyze text typed on the command line:
 
@@ -195,8 +252,14 @@ To analyze a local file through the API, send `{"source":"file","data":{"path":"
 `POST /analyze` is limited per authenticated user. Configure
 `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` in `.env` (defaults: 10
 requests per 120 seconds). The window is clamped to a minimum of 120 seconds.
-Counters are stored in SQLite and survive process restarts. An exceeded limit
-returns HTTP 429. This protects request volume; it does not detect unsafe content.
+Without `REDIS_URL`, counters use local SQLite and survive process restarts on
+that host. For multiple API hosts, configure a private Redis endpoint with
+`REDIS_URL` and set `RATE_LIMIT_REQUIRE_SHARED=true`; Redis performs the rolling
+counter update atomically, so all hosts enforce the same limit. In required mode,
+missing or unreachable Redis makes requests fail closed with HTTP 503 instead of
+silently falling back to per-host limits. Install dependencies from
+`requirements.txt` after adding this configuration. Exceeded limits return HTTP
+429. Rate limiting controls request volume; it does not detect unsafe content.
 
 `POST /rag/query` has a separate persistent per-user limit configured with
 `RAG_RATE_LIMIT_REQUESTS` and `RAG_RATE_LIMIT_WINDOW_SECONDS`; it has the same
@@ -221,7 +284,7 @@ $headers = @{ Authorization = 'Bearer <user token created by python -m app auth 
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/rag/query -Headers $headers -ContentType 'application/json' -Body '{"question":"How long do refunds take?"}'
 ```
 
-The response is JSON with an `answer` and `citations` containing source and retrieved snippet. The local demo corpus has 24 short entries in `demo/corpus.json`; retrieval uses a lightweight local hashed vector index (cosine similarity), with only the top matching excerpts sent to Gemini. If no chunk matches, the API returns an explicit no-information answer with an empty citation list. RAG questions are capped at 1,000 characters. The same `GEMINI_API_KEY` and `GEMINI_MODEL` settings are used; `GEMINI_OFFLINE=true` provides a deterministic local demo answer.
+The response is JSON with an `answer` and `citations` containing source and supporting quote. Both RAG APIs ask Gemini for source/quote claims, then accept only a quote that matches a full retrieved excerpt exactly. The returned answer is assembled from those excerpts, so generated paraphrases or partial quotes that could omit context are rejected. The local demo corpus has 24 short entries in `demo/corpus.json`; retrieval uses a lightweight local hashed vector index (cosine similarity), with only the top matching excerpts sent to Gemini. If no chunk matches, the API returns an explicit no-information answer with an empty citation list. RAG questions are capped at 1,000 characters. The same `GEMINI_API_KEY` and `GEMINI_MODEL` settings are used; `GEMINI_OFFLINE=true` provides a deterministic extractive answer.
 
 When `GEMINI_OFFLINE=false`, the integrated `/rag/query` route calls Gemini, just
 like standalone RAG. Recognizable PII in questions, retrieved snippets, and
@@ -262,7 +325,7 @@ Example questions:
 
 ## What the guardrails still miss
 
-PII masking and injection detection use patterns, so unusual phone formats and indirect or encoded instructions can pass through. The integrated sentiment and RAG rate limits are stored in SQLite and keyed by authenticated user; standalone RAG uses a persistent SQLite limit keyed by client IP. These local limits are not shared across multiple machines or a production multi-host deployment. RAG citations show the retrieved excerpts used as context; generated text still needs review for faithful grounding. The offline classifier is only a pipeline demonstration, not a sentiment model.
+PII masking and injection detection use patterns, so unusual identifiers and indirect, encoded, or multilingual instructions can pass through. SQLite rate limits are local to one host. Configure `REDIS_URL` for a shared rolling limit, and set `RATE_LIMIT_REQUIRE_SHARED=true` so hosts fail closed if Redis is unavailable. RAG answers are assembled from full retrieved excerpts that are validated against their cited source; retrieval can still select an irrelevant excerpt. The offline classifier is only a pipeline demonstration, not a sentiment model.
 
 ## Standalone email RAG
 

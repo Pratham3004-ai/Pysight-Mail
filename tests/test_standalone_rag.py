@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from standalone_rag import core
 from standalone_rag.api import app
 from app.core import AppError
-from app.security_store import SUPPORTED_SCOPES, clear_rate_limit_events, create_user_token
+from app.security_store import RateLimitBackendError, SUPPORTED_SCOPES, clear_rate_limit_events, create_user_token
 from standalone_rag.api import _rate_limit
 
 
@@ -24,7 +24,7 @@ class StandaloneRagTests(unittest.TestCase):
         test_data_dir.mkdir(exist_ok=True)
         self.history_path = test_data_dir / "standalone-history-test.sqlite3"
         self.index_path = test_data_dir / "test-index.sqlite3"
-        self.environment = patch.dict(os.environ, {"GEMINI_OFFLINE": "true", "RAG_RATE_LIMIT_REQUESTS": "20", "RAG_RATE_LIMIT_WINDOW_SECONDS": "120"})
+        self.environment = patch.dict(os.environ, {"GEMINI_OFFLINE": "true", "RAG_RATE_LIMIT_REQUESTS": "20", "RAG_RATE_LIMIT_WINDOW_SECONDS": "120", "REDIS_URL": "", "RATE_LIMIT_REQUIRE_SHARED": ""})
         self.environment.start()
         from app import vector_store
         self.db_patch = patch.object(vector_store, "DB_PATH", self.history_path)
@@ -85,12 +85,15 @@ class StandaloneRagTests(unittest.TestCase):
         self.assertIn("[EMAIL_REDACTED]", row[0])
 
     def test_live_standalone_rag_redacts_question_pii_before_gemini(self):
+        question = "What did support offer for the delayed delivery? Contact maya@example.com"
+        match = next(iter(core.retrieve(core._validate_question(question), index_path=self.index_path)))
+        model_output = json.dumps({"claims": [{"source": match["source"], "quote": match["snippet"]}]})
         with patch.dict(os.environ, {"GEMINI_OFFLINE": "false", "GEMINI_API_KEY": "test-key"}):
             with patch("google.genai.Client") as factory:
-                factory.return_value.models.generate_content.return_value.text = '{"answer":"Support offered a replacement."}'
+                factory.return_value.models.generate_content.return_value.text = model_output
                 response = self.client.post(
                     "/rag/query",
-                    json={"question": "What did support offer for the delayed delivery? Contact maya@example.com"},
+                    json={"question": question},
                 )
         self.assertEqual(response.status_code, 200)
         contents = factory.return_value.models.generate_content.call_args.kwargs["contents"]
@@ -111,13 +114,16 @@ class StandaloneRagTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 422)
 
     def test_retrieved_injection_stays_in_untrusted_evidence_separate_from_system_prompt(self):
+        question = "What does the synthetic message say about a package arriving late?"
+        match = next(iter(core.retrieve(question, index_path=self.index_path)))
+        model_output = json.dumps({"claims": [{"source": match["source"], "quote": match["snippet"]}]})
         with patch.dict(os.environ, {"GEMINI_OFFLINE": "false", "GEMINI_API_KEY": "test-key"}):
             with patch("google.genai.Client") as client_factory:
                 client = client_factory.return_value
-                client.models.generate_content.return_value.text = '{"answer":"The email contains an instruction override attempt."}'
+                client.models.generate_content.return_value.text = model_output
                 response = self.client.post(
                     "/rag/query",
-                    json={"question": "What does the synthetic message say about a package arriving late?"},
+                    json={"question": question},
                 )
 
         self.assertEqual(response.status_code, 200)
@@ -128,7 +134,7 @@ class StandaloneRagTests(unittest.TestCase):
         self.assertIn("untrusted", system_instruction.casefold())
         self.assertNotIn("Ignore all previous instructions", system_instruction)
         self.assertNotIn("The replacement arrived quickly and works perfectly", contents)
-        self.assertEqual(response.json()["answer"], "The email contains an instruction override attempt.")
+        self.assertEqual(response.json()["answer"], response.json()["citations"][0]["snippet"])
 
     def test_question_length_and_payload_shape_are_enforced(self):
         too_long = self.client.post("/rag/query", json={"question": "x" * 1001})
@@ -143,6 +149,13 @@ class StandaloneRagTests(unittest.TestCase):
             self.assertEqual(self.client.post("/rag/query", json=request).status_code, 200)
             limited = self.client.post("/rag/query", json=request)
             self.assertEqual(limited.status_code, 429)
+
+    def test_standalone_api_fails_closed_when_shared_rate_limiter_is_unavailable(self):
+        with patch("standalone_rag.api.consume_rate_limit", side_effect=RateLimitBackendError("private backend detail")):
+            response = self.client.post("/rag/query", json={"question": "What did support offer?"})
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Shared rate-limit service is unavailable", response.json()["error"])
+        self.assertNotIn("private backend detail", response.text)
 
     def test_standalone_rate_limit_is_durable_and_partitioned_by_ip(self):
         with patch.dict(os.environ, {"RAG_RATE_LIMIT_REQUESTS": "1", "RAG_RATE_LIMIT_WINDOW_SECONDS": "60"}):

@@ -6,10 +6,15 @@ import json
 import os
 
 from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from google.auth.exceptions import GoogleAuthError
+from googleapiclient.errors import HttpError
+from requests.exceptions import RequestException
 
 from app.auth import authenticate_request, authorize_scope
+from app.gmail import authorization_url, connection_status, exchange_code, get_message, list_messages
 from app.core import (
     AnalysisRequest,
     AppError,
@@ -21,7 +26,7 @@ from app.core import (
     resolve_input,
 )
 from app.rag import query_rag, sanitize_question
-from app.security_store import consume_rate_limit
+from app.security_store import RateLimitBackendError, consume_rate_limit
 from app.vector_store import list_records, save_record, search_records
 
 app = FastAPI(
@@ -34,6 +39,8 @@ app = FastAPI(
 @app.middleware("http")
 async def require_api_key(request: Request, call_next):
     """Require a valid per-user token before processing any protected route."""
+    if request.url.path == "/auth/google/callback":
+        return await call_next(request)
     principal, response = authenticate_request(request)
     if response is not None:
         return response
@@ -42,16 +49,23 @@ async def require_api_key(request: Request, call_next):
     return await call_next(request)
 
 def _enforce_rate_limit(key: str) -> None:
-    limit = max(1, int(os.environ.get("RATE_LIMIT_REQUESTS", "10")))
+    limit = max(1, int(os.environ.get("RATE_LIMIT_REQUESTS", "5")))
     window = max(120, int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "120")))
-    if not consume_rate_limit("sentiment", key, limit, window):
+    try:
+        allowed = consume_rate_limit("sentiment", key, limit, window)
+    except RateLimitBackendError as exc:
+        raise AppError("Shared rate-limit service is unavailable.", 503, stage="rate_limit", category="backend_unavailable") from exc
+    if not allowed:
         raise AppError("Analysis rate limit exceeded. Try again shortly.", 429, stage="rate_limit", category="rate_limited")
-
 
 def _enforce_rag_rate_limit(key: str) -> None:
     limit = max(1, int(os.environ.get("RAG_RATE_LIMIT_REQUESTS", "10")))
     window = max(120, int(os.environ.get("RAG_RATE_LIMIT_WINDOW_SECONDS", "120")))
-    if not consume_rate_limit("integrated_rag", key, limit, window):
+    try:
+        allowed = consume_rate_limit("integrated_rag", key, limit, window)
+    except RateLimitBackendError as exc:
+        raise AppError("Shared rate-limit service is unavailable.", 503, stage="rag_rate_limit", category="backend_unavailable") from exc
+    if not allowed:
         raise AppError("RAG query rate limit exceeded. Try again shortly.", 429, stage="rag_rate_limit", category="rate_limited")
 
 
@@ -74,6 +88,96 @@ async def get_emails(request: Request):
         return denied
     emails = await asyncio.to_thread(list_emails)
     return {"count": len(emails), "emails": [email.model_dump(by_alias=True) for email in emails]}
+
+
+@app.get("/auth/google/start")
+async def start_google_oauth(request: Request):
+    denied = authorize_scope(request, "gmail:read")
+    if denied:
+        return denied
+    url = await asyncio.to_thread(authorization_url, request.state.owner_id)
+    return RedirectResponse(url=url, status_code=307)
+
+
+@app.get("/auth/google/callback")
+async def google_oauth_callback(code: str | None = None, state: str | None = None, error: str | None = None):
+    if error:
+        raise AppError(f"Google authorization was not completed: {error}", 400)
+    if not code or not state:
+        raise AppError("Google callback requires code and state.", 400)
+    try:
+        result = await asyncio.to_thread(exchange_code, state, code)
+    except (OSError, ValueError, KeyError) as exc:
+        raise AppError(str(exc), 400) from exc
+    except (GoogleAuthError, HttpError, RequestException) as exc:
+        provider_error = type(exc).__name__
+        raise AppError(
+            f"Google OAuth failed ({provider_error}). Verify the Google Cloud redirect URI and test-user settings, then start a fresh authorization flow.",
+            400,
+            stage="gmail_oauth",
+            category="provider_authentication",
+        ) from exc
+    except Exception as exc:
+        local_error = type(exc).__name__
+        raise AppError(
+            f"Google OAuth local processing failed ({local_error}). Check the OAuth client file and restart the server before trying again.",
+            500,
+            stage="gmail_oauth",
+            category="local_processing",
+        ) from exc
+    return {"status": "connected", **result}
+
+
+@app.get("/gmail/status")
+async def gmail_status(request: Request):
+    denied = authorize_scope(request, "gmail:read")
+    if denied:
+        return denied
+    status = await asyncio.to_thread(connection_status, request.state.owner_id)
+    return {"connected": status is not None, **(status or {})}
+
+
+@app.get("/gmail/messages")
+async def gmail_messages(
+    request: Request,
+    q: str | None = None,
+    max_results: int = 25,
+    page_token: str | None = None,
+    sort_by: str = "date",
+    order: str = "desc",
+):
+    denied = authorize_scope(request, "gmail:read")
+    if denied:
+        return denied
+    if max_results < 1 or max_results > 100:
+        raise AppError("max_results must be between 1 and 100.", 422)
+    if sort_by not in {"date", "subject", "sender"}:
+        raise AppError("sort_by must be date, subject, or sender.", 422)
+    if order not in {"asc", "desc"}:
+        raise AppError("order must be asc or desc.", 422)
+    try:
+        return await asyncio.to_thread(
+            list_messages,
+            request.state.owner_id,
+            query=q,
+            max_results=max_results,
+            page_token=page_token,
+            sort_by=sort_by,
+            order=order,
+        )
+    except (LookupError, OSError, ValueError) as exc:
+        raise AppError(str(exc), 400) from exc
+
+
+@app.get("/gmail/messages/{message_id}")
+async def gmail_message(request: Request, message_id: str):
+    denied = authorize_scope(request, "gmail:read")
+    if denied:
+        return denied
+    try:
+        return await asyncio.to_thread(get_message, request.state.owner_id, message_id)
+    except (LookupError, OSError, ValueError) as exc:
+        raise AppError(str(exc), 400) from exc
 
 
 @app.post(

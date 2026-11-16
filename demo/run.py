@@ -52,6 +52,8 @@ def run() -> None:
         "RATE_LIMIT_WINDOW_SECONDS": "120",
         "RAG_RATE_LIMIT_REQUESTS": "10",
         "RAG_RATE_LIMIT_WINDOW_SECONDS": "120",
+        "REDIS_URL": "",
+        "RATE_LIMIT_REQUIRE_SHARED": "false",
     }):
         demo_db = ROOT.parent / "tests" / "_runtime" / "demo-run.sqlite3"
         demo_db.parent.mkdir(parents=True, exist_ok=True)
