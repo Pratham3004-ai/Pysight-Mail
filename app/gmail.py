@@ -121,6 +121,7 @@ def _oauth_flow(state: str | None = None):
         scopes=[GOOGLE_SCOPE],
         state=state,
     )
+    flow.autogenerate_code_verifier = False
     flow.redirect_uri = _redirect_uri()
     return flow
 
