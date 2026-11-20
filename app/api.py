@@ -96,7 +96,15 @@ async def start_google_oauth(request: Request):
     denied = authorize_scope(request, "gmail:read")
     if denied:
         return denied
-    url = await asyncio.to_thread(authorization_url, request.state.owner_id)
+    try:
+        url = await asyncio.to_thread(authorization_url, request.state.owner_id)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise AppError(
+            f"Google OAuth configuration error: {exc}",
+            503,
+            stage="gmail_oauth_setup",
+            category="invalid_configuration",
+        ) from exc
     return RedirectResponse(url=url, status_code=307)
 
 

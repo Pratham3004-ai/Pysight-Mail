@@ -97,6 +97,25 @@ def _redirect_uri() -> str:
 def _oauth_flow(state: str | None = None):
     from google_auth_oauthlib.flow import Flow
 
+    secrets_path = Path(_client_secrets_path())
+    if not secrets_path.is_file():
+        raise ValueError("Google OAuth client file is missing. Configure GOOGLE_CLIENT_SECRETS_FILE.")
+
+    client_config = json.loads(secrets_path.read_text(encoding="utf-8"))
+    if "web" not in client_config:
+        raise ValueError(
+            "Google OAuth client must be type 'Web application', not 'Desktop app'. "
+            "Download a Web application client JSON and set GOOGLE_CLIENT_SECRETS_FILE."
+        )
+
+    redirect_uri = _redirect_uri()
+    registered_redirects = client_config["web"].get("redirect_uris", [])
+    if redirect_uri not in registered_redirects:
+        raise ValueError(
+            "GOOGLE_REDIRECT_URI is not registered in the Google OAuth client. "
+            f"Add exactly '{redirect_uri}' as an Authorized redirect URI."
+        )
+
     flow = Flow.from_client_secrets_file(
         _client_secrets_path(),
         scopes=[GOOGLE_SCOPE],
