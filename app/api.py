@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from google.auth.exceptions import GoogleAuthError
 from googleapiclient.errors import HttpError
+from oauthlib.oauth2.rfc6749.errors import InvalidGrantError
 from requests.exceptions import RequestException
 
 from app.auth import authenticate_request, authorize_scope
@@ -109,6 +110,13 @@ async def google_oauth_callback(code: str | None = None, state: str | None = Non
         result = await asyncio.to_thread(exchange_code, state, code)
     except (OSError, ValueError, KeyError) as exc:
         raise AppError(str(exc), 400) from exc
+    except InvalidGrantError as exc:
+        raise AppError(
+            "Google rejected the authorization code (InvalidGrant). Start a fresh Gmail connection; the code may be expired, already used, or mismatched with the OAuth redirect configuration.",
+            400,
+            stage="gmail_oauth",
+            category="invalid_grant",
+        ) from exc
     except (GoogleAuthError, HttpError, RequestException) as exc:
         provider_error = type(exc).__name__
         raise AppError(
