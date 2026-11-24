@@ -247,6 +247,25 @@ POST /analyze
 
 To analyze a local file through the API, send `{"source":"file","data":{"path":"complaint.json"}}` to the same `POST /analyze` endpoint.
 
+For an email supplied directly in Postman, `POST /analyze` accepts either the
+existing wrapped format or a top-level `subject` and `body`:
+
+```json
+{
+  "subject": "Delivery feedback",
+  "body": "My package arrived late and I am disappointed."
+}
+```
+
+To analyze a message from the authenticated user's connected Gmail account,
+use `POST /gmail/messages/{message_id}/analyze` (requires both `gmail:read` and
+`sentiment:analyze` scopes), or send
+`{"source":"gmail","data":{"message_id":"<message_id>"}}` to `POST /analyze`.
+The message ID is the `id` returned by `GET /gmail/messages`. The endpoint
+retrieves that user's Gmail message and passes its subject and body through the
+same text cleanup, privacy filtering, and sentiment analysis pipeline. Gmail
+must already be connected for that API user.
+
 ### Analyze rate limit
 
 `POST /analyze` is limited per authenticated user. Configure
@@ -392,3 +411,30 @@ python -m app analyze --source file --path complaint.json
 HTTP 429 quota responses are retried twice with short backoff delays before returning an error. This improves quota/reliability behavior; it is not a safety or prompt-injection guardrail.
 
 When asking for help, share the diagnostic ID and a reviewed matching log line only; never `.env`, email content, or full provider errors.
+
+
+
+#Read it once
+
+I’ll inspect the existing Gmail message and sentiment routes first, then adapt the project’s current patterns for both analysis inputs and verify the endpoint behavior.
+
+The existing /analyze already supports the documented nested subject/body format, but it does not fetch Gmail messages. I’m adding a Gmail-backed POST by message ID (plus a direct subject/body JSON convenience format), keeping Gmail access scoped to the authenticated user and preserving the existing analysis pipeline.
+
+The new routes and Postman examples are in place. I’ve also added focused tests for direct subject/body input and both message-ID forms; I’m running those checks now.
+
+Implemented both POST analysis options:
+
+POST /gmail/messages/{message_id}/analyze fetches the message from the authenticated user’s connected Gmail and analyzes it. Requires gmail:read and sentiment:analyze.
+POST /analyze accepts a Gmail ID as {"source":"gmail","data":{"message_id":"..."}}.
+POST /analyze now also accepts direct {"subject":"...","body":"..."} JSON, as well as the existing wrapped format.
+Both routes use the existing cleanup, PII redaction, sentiment analysis, and history pipeline. I updated the Postman collection and usage docs in postman_collection.json and README.md.
+
+Verification: all 39 sentiment API tests passed; the Postman collection JSON is valid. Gmail retrieval was tested with a mock, not a live Gmail account.
+
+
++150
+-15
+9:58 pm
+1m 53s
+•
+Copilot

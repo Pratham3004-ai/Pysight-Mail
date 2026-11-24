@@ -154,6 +154,7 @@ class AnalysisData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str | None = None
+    message_id: str | None = Field(default=None, min_length=1, max_length=200)
     subject: str | None = None
     body: str | None = None
 
@@ -161,7 +162,7 @@ class AnalysisData(BaseModel):
 class AnalysisRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source: Literal["file", "payload", "text"]
+    source: Literal["file", "payload", "text", "gmail"]
     data: AnalysisData
 
 
@@ -174,7 +175,7 @@ class GeminiResult(BaseModel):
 
 
 class AnalysisResult(GeminiResult):
-    source: Literal["file", "payload", "text"]
+    source: Literal["file", "payload", "text", "gmail"]
     email_id: str | None
     truncated: bool
     pii_redacted: bool
@@ -477,7 +478,7 @@ def _offline_response(subject: str, body: str) -> str:
 
 def analyze_email(
     email: Email,
-    source: Literal["file", "payload", "text"],
+    source: Literal["file", "payload", "text", "gmail"],
     progress: Callable[[str], None] | None = None,
 ) -> AnalysisResult:
     """Analyze one email. The optional callback is for safe CLI progress only."""

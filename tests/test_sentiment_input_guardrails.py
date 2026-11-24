@@ -52,6 +52,48 @@ class SentimentInputGuardrailTests(unittest.TestCase):
         malformed = self.client.post("/analyze", content=b"{not-json", headers={"content-type": "application/json"})
         self.assertEqual(malformed.status_code, 422)
 
+    def test_subject_and_body_can_be_sent_directly(self):
+        response = self.client.post(
+            "/analyze",
+            json={"subject": "Delivery feedback", "body": "The package arrived late and I am disappointed."},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["sentiment"], "negative")
+        self.assertEqual(response.json()["source"], "payload")
+
+    def test_gmail_message_can_be_analyzed_by_message_id(self):
+        gmail_message = {
+            "id": "gmail-message-123",
+            "sender": "customer@example.com",
+            "subject": "Delayed delivery",
+            "body": "My package arrived late and I am disappointed.",
+        }
+        with patch("app.api.get_message", return_value=gmail_message) as fetch_message:
+            response = self.client.post("/gmail/messages/gmail-message-123/analyze")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["email_id"], "gmail-message-123")
+        self.assertEqual(response.json()["source"], "gmail")
+        fetch_message.assert_called_once_with(self.user_id, "gmail-message-123")
+
+    def test_analyze_endpoint_can_also_resolve_a_gmail_message_id(self):
+        gmail_message = {
+            "id": "gmail-message-456",
+            "sender": "customer@example.com",
+            "subject": "Thank you",
+            "body": "The support was great.",
+        }
+        with patch("app.api.get_message", return_value=gmail_message):
+            response = self.client.post(
+                "/analyze",
+                json={"source": "gmail", "data": {"message_id": "gmail-message-456"}},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["email_id"], "gmail-message-456")
+        self.assertEqual(response.json()["sentiment"], "positive")
+
     def test_pii_is_redacted_before_the_offline_classifier_receives_email(self):
         body = "Contact maya@example.com or +1 415-555-0134. The service was great."
         with patch("app.core._offline_response", wraps=core._offline_response) as classifier:

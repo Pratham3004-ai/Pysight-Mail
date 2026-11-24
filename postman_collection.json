@@ -11,6 +11,7 @@
   "variable": [
     {"key": "baseUrl", "value": "http://127.0.0.1:8000"},
     {"key": "standaloneRagUrl", "value": "http://127.0.0.1:8010"},
+    {"key": "messageId", "value": ""},
     {"key": "apiKey", "value": ""}
   ],
   "item": [
@@ -21,6 +22,16 @@
           "name": "Normal email",
           "request": {"method": "POST", "header": [{"key": "Content-Type", "value": "application/json"}], "body": {"mode": "raw", "raw": "{\n  \"source\": \"payload\",\n  \"data\": {\n    \"subject\": \"Delivery feedback\",\n    \"body\": \"My package arrived late and I am disappointed.\"\n  }\n}"}, "url": "{{baseUrl}}/analyze"},
           "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('sentiment succeeds with a fixed label', function () {", "  pm.response.to.have.status(200);", "  pm.expect(['positive','negative','neutral','mixed']).to.include(pm.response.json().sentiment);", "});"]}}]
+        },
+        {
+          "name": "Analyze Gmail message by ID",
+          "request": {"method": "POST", "header": [{"key": "Content-Type", "value": "application/json"}], "url": "{{baseUrl}}/gmail/messages/{{messageId}}/analyze"},
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('Gmail message sentiment succeeds', function () {", "  pm.response.to.have.status(200);", "  pm.expect(pm.response.json()).to.have.property('email_id', pm.variables.get('messageId'));", "  pm.expect(['positive','negative','neutral','mixed']).to.include(pm.response.json().sentiment);", "});"]}}]
+        },
+        {
+          "name": "Analyze direct subject and body",
+          "request": {"method": "POST", "header": [{"key": "Content-Type", "value": "application/json"}], "body": {"mode": "raw", "raw": "{\n  \"subject\": \"Delivery feedback\",\n  \"body\": \"My package arrived late and I am disappointed.\"\n}"}, "url": "{{baseUrl}}/analyze"},
+          "event": [{"listen": "test", "script": {"type": "text/javascript", "exec": ["pm.test('direct subject and body are analyzed', function () {", "  pm.response.to.have.status(200);", "  pm.expect(pm.response.json()).to.have.property('source', 'payload');", "});"]}}]
         },
         {
           "name": "PII is redacted before analysis and stored redacted",

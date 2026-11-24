@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from typing import Literal
 
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
@@ -19,10 +20,12 @@ from app.gmail import authorization_url, connection_status, exchange_code, get_m
 from app.core import (
     AnalysisRequest,
     AppError,
+    Email,
     MAX_RAW_BYTES,
     analyze_email,
     attach_diagnostic,
     list_emails,
+    parse_email,
     prepare_email,
     resolve_input,
 )
@@ -196,9 +199,45 @@ async def gmail_message(request: Request, message_id: str):
         raise AppError(str(exc), 400) from exc
 
 
+async def _load_gmail_email(owner_id: str, message_id: str) -> Email:
+    try:
+        message = await asyncio.to_thread(get_message, owner_id, message_id)
+    except LookupError as exc:
+        raise AppError(str(exc), 400, stage="gmail_message", category="not_found") from exc
+    except HttpError as exc:
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        if status == 404:
+            raise AppError("Gmail message not found in the connected account.", 404, stage="gmail_message", category="not_found") from exc
+        raise AppError("Could not retrieve the Gmail message from Google.", 502, stage="gmail_message", category="provider_error") from exc
+    except (OSError, ValueError) as exc:
+        raise AppError(str(exc), 400, stage="gmail_message") from exc
+    return parse_email(
+        {
+            "id": message.get("id") or message_id,
+            "sender": message.get("sender"),
+            "subject": message.get("subject") or "",
+            "body": message.get("body"),
+        },
+        fallback_id=message_id,
+    )
+
+
+async def _analyze_and_save(request: Request, email: Email, source: Literal["file", "payload", "text", "gmail"]) -> dict:
+    result = await asyncio.to_thread(analyze_email, email, source)
+    safe_subject, safe_body, _truncated, _pii = await asyncio.to_thread(prepare_email, email)
+    await asyncio.to_thread(
+        save_record,
+        request.state.owner_id,
+        "sentiment",
+        json.dumps({"subject": safe_subject, "body": safe_body}, ensure_ascii=False),
+        result.model_dump(),
+    )
+    return result.model_dump()
+
+
 @app.post(
     "/analyze",
-    description="Pass source=payload with data.subject/body, or source=file with data.path (filename under emails/).",
+    description="Pass source=payload with data.subject/body, source=gmail with data.message_id, or source=file with data.path. A top-level subject/body object is also accepted.",
     openapi_extra={"requestBody": {"required": True, "content": {"application/json": {"schema": AnalysisRequest.model_json_schema()}}}},
 )
 async def post_analyze(request: Request):
@@ -217,9 +256,11 @@ async def post_analyze(request: Request):
         chunks.append(chunk)
     try:
         payload = json.loads(b"".join(chunks).decode("utf-8"))
+        if isinstance(payload, dict) and "source" not in payload and set(payload) == {"subject", "body"}:
+            payload = {"source": "payload", "data": payload}
         parsed = AnalysisRequest.model_validate(payload)
     except (UnicodeError, ValueError, ValidationError) as exc:
-        raise AppError("Invalid JSON input: provide source and data in the documented format.", 422) from exc
+        raise AppError("Invalid JSON input: provide source and data in the documented format, or provide subject and body.", 422) from exc
     if parsed.source == "text":
         raise AppError("Use source=payload for HTTP requests; source=text is for the CLI.", 422)
     if parsed.source == "payload" and (
@@ -228,18 +269,39 @@ async def post_analyze(request: Request):
         or parsed.data.body is None
     ):
         raise AppError("For source=payload, provide text subject and body fields.", 422)
+    if parsed.source == "gmail":
+        if not parsed.data.message_id or any(
+            getattr(parsed.data, key) is not None for key in ("path", "subject", "body")
+        ):
+            raise AppError("For source=gmail, provide only data.message_id.", 422)
+        denied = authorize_scope(request, "gmail:read")
+        if denied:
+            return denied
+    elif parsed.data.message_id is not None:
+        raise AppError("data.message_id is only valid for source=gmail.", 422)
     request.state.source_type = parsed.source
-    email = await asyncio.to_thread(resolve_input, parsed.source, parsed.data.model_dump())
-    result = await asyncio.to_thread(analyze_email, email, parsed.source)
-    safe_subject, safe_body, _truncated, _pii = await asyncio.to_thread(prepare_email, email)
-    await asyncio.to_thread(
-        save_record,
-        request.state.owner_id,
-        "sentiment",
-        json.dumps({"subject": safe_subject, "body": safe_body}, ensure_ascii=False),
-        result.model_dump(),
-    )
-    return result.model_dump()
+    if parsed.source == "gmail":
+        email = await _load_gmail_email(request.state.owner_id, parsed.data.message_id)
+    else:
+        email = await asyncio.to_thread(resolve_input, parsed.source, parsed.data.model_dump())
+    return await _analyze_and_save(request, email, parsed.source)
+
+
+@app.post(
+    "/gmail/messages/{message_id}/analyze",
+    description="Analyze one message in the authenticated user's connected Gmail account.",
+)
+async def post_analyze_gmail_message(request: Request, message_id: str):
+    denied = authorize_scope(request, "gmail:read")
+    if denied:
+        return denied
+    denied = authorize_scope(request, "sentiment:analyze")
+    if denied:
+        return denied
+    _enforce_rate_limit(request.state.owner_id)
+    request.state.source_type = "gmail"
+    email = await _load_gmail_email(request.state.owner_id, message_id)
+    return await _analyze_and_save(request, email, "gmail")
 
 
 @app.post("/rag/query")
